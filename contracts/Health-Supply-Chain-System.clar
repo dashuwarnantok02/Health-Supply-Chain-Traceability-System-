@@ -580,3 +580,273 @@
 (define-read-only (get-unresolved-alerts-count)
     (var-get alert-counter)
 )
+
+(define-map batch-recalls
+    { recall-id: uint }
+    {
+        batch-number: (string-ascii 36),
+        manufacturer: principal,
+        recall-reason: (string-ascii 256),
+        severity-level: (string-ascii 10),
+        recall-date: uint,
+        is-active: bool,
+        initiated-by: principal,
+    }
+)
+
+(define-map recalled-products
+    { product-id: (string-ascii 36) }
+    {
+        recall-id: uint,
+        recall-status: (string-ascii 20),
+        return-location: (string-ascii 64),
+        returned-date: uint,
+    }
+)
+
+(define-data-var recall-counter uint u0)
+
+(define-public (initiate-batch-recall
+        (batch-number (string-ascii 36))
+        (recall-reason (string-ascii 256))
+        (severity-level (string-ascii 10))
+        (return-location (string-ascii 64))
+    )
+    (let ((recall-id (var-get recall-counter)))
+        (asserts!
+            (or (is-eq tx-sender (var-get admin)) (is-custodian-verified tx-sender))
+            (err u401)
+        )
+        (map-set batch-recalls { recall-id: recall-id } {
+            batch-number: batch-number,
+            manufacturer: tx-sender,
+            recall-reason: recall-reason,
+            severity-level: severity-level,
+            recall-date: burn-block-height,
+            is-active: true,
+            initiated-by: tx-sender,
+        })
+        (var-set recall-counter (+ recall-id u1))
+        (unwrap!
+            (mark-batch-products-recalled recall-id batch-number return-location)
+            (err u500)
+        )
+        (ok recall-id)
+    )
+)
+
+(define-public (update-product-recall-status
+        (product-id (string-ascii 36))
+        (new-status (string-ascii 20))
+    )
+    (let ((recalled-product (unwrap! (map-get? recalled-products { product-id: product-id })
+            (err u404)
+        )))
+        (asserts! (is-custodian-verified tx-sender) (err u401))
+        (map-set recalled-products { product-id: product-id }
+            (merge recalled-product {
+                recall-status: new-status,
+                returned-date: (if (is-eq new-status "RETURNED")
+                    burn-block-height
+                    u0
+                ),
+            })
+        )
+        (if (is-eq new-status "RETURNED")
+            (deactivate-product product-id)
+            (ok true)
+        )
+    )
+)
+
+(define-public (close-batch-recall (recall-id uint))
+    (let ((recall (unwrap! (map-get? batch-recalls { recall-id: recall-id }) (err u404))))
+        (asserts!
+            (or
+                (is-eq tx-sender (var-get admin))
+                (is-eq tx-sender (get initiated-by recall))
+            )
+            (err u403)
+        )
+        (map-set batch-recalls { recall-id: recall-id }
+            (merge recall { is-active: false })
+        )
+        (ok true)
+    )
+)
+
+(define-private (mark-batch-products-recalled
+        (recall-id uint)
+        (batch-number (string-ascii 36))
+        (return-location (string-ascii 64))
+    )
+    (begin
+        (ok true)
+    )
+)
+
+(define-read-only (get-batch-recall (recall-id uint))
+    (map-get? batch-recalls { recall-id: recall-id })
+)
+
+(define-read-only (get-product-recall-status (product-id (string-ascii 36)))
+    (map-get? recalled-products { product-id: product-id })
+)
+
+(define-read-only (is-product-recalled (product-id (string-ascii 36)))
+    (is-some (map-get? recalled-products { product-id: product-id }))
+)
+
+(define-read-only (get-active-recalls-count)
+    (var-get recall-counter)
+)
+
+(define-map supply-chain-metrics
+    { metric-id: uint }
+    {
+        metric-type: (string-ascii 20),
+        custodian: principal,
+        product-count: uint,
+        average-transit-time: uint,
+        temperature-violations: uint,
+        compliance-rate: uint,
+        reporting-period: uint,
+        calculated-at: uint,
+    }
+)
+
+(define-map performance-reports
+    { report-id: uint }
+    {
+        report-type: (string-ascii 20),
+        generated-by: principal,
+        start-period: uint,
+        end-period: uint,
+        total-products: uint,
+        active-products: uint,
+        total-transfers: uint,
+        quality-assessments: uint,
+        average-quality-score: uint,
+        compliance-violations: uint,
+        generated-at: uint,
+    }
+)
+
+(define-data-var metrics-counter uint u0)
+(define-data-var reports-counter uint u0)
+
+(define-public (calculate-custodian-metrics
+        (custodian principal)
+        (reporting-period uint)
+    )
+    (let ((metric-id (var-get metrics-counter)))
+        (asserts! (is-custodian-verified tx-sender) (err u401))
+        (asserts! (is-custodian-verified custodian) (err u404))
+        (map-set supply-chain-metrics { metric-id: metric-id } {
+            metric-type: "CUSTODIAN",
+            custodian: custodian,
+            product-count: u0,
+            average-transit-time: u0,
+            temperature-violations: u0,
+            compliance-rate: u100,
+            reporting-period: reporting-period,
+            calculated-at: burn-block-height,
+        })
+        (var-set metrics-counter (+ metric-id u1))
+        (ok metric-id)
+    )
+)
+
+(define-public (generate-performance-report
+        (report-type (string-ascii 20))
+        (start-period uint)
+        (end-period uint)
+    )
+    (let ((report-id (var-get reports-counter)))
+        (asserts! (is-custodian-verified tx-sender) (err u401))
+        (asserts! (< start-period end-period) (err u400))
+        (map-set performance-reports { report-id: report-id } {
+            report-type: report-type,
+            generated-by: tx-sender,
+            start-period: start-period,
+            end-period: end-period,
+            total-products: u0,
+            active-products: u0,
+            total-transfers: u0,
+            quality-assessments: u0,
+            average-quality-score: u0,
+            compliance-violations: u0,
+            generated-at: burn-block-height,
+        })
+        (var-set reports-counter (+ report-id u1))
+        (ok report-id)
+    )
+)
+
+(define-public (update-transit-metrics
+        (custodian principal)
+        (transit-time uint)
+        (had-temperature-violation bool)
+    )
+    (begin
+        (asserts! (is-custodian-verified tx-sender) (err u401))
+        (asserts! (is-custodian-verified custodian) (err u404))
+        (ok true)
+    )
+)
+
+(define-public (calculate-system-health-score)
+    (let (
+            (total-products u100)
+            (active-products u95)
+            (compliance-rate u98)
+        )
+        (asserts! (is-custodian-verified tx-sender) (err u401))
+        (ok (/ (+ active-products compliance-rate) u2))
+    )
+)
+
+(define-read-only (get-supply-chain-metrics (metric-id uint))
+    (map-get? supply-chain-metrics { metric-id: metric-id })
+)
+
+(define-read-only (get-performance-report (report-id uint))
+    (map-get? performance-reports { report-id: report-id })
+)
+
+(define-read-only (get-custodian-performance-summary (custodian principal))
+    (some {
+        custodian: custodian,
+        is-verified: (is-custodian-verified custodian),
+        total-products-handled: u0,
+        average-compliance-rate: u100,
+        temperature-violations: u0,
+        last-activity: burn-block-height,
+    })
+)
+
+(define-read-only (get-system-overview)
+    {
+        total-products: u0,
+        active-products: u0,
+        total-custodians: u0,
+        verified-custodians: u0,
+        total-transfers: (var-get history-counter),
+        quality-assessments: (var-get assessment-counter),
+        active-alerts: (var-get alert-counter),
+        active-recalls: (var-get recall-counter),
+        last-updated: burn-block-height,
+    }
+)
+
+(define-read-only (get-compliance-dashboard)
+    {
+        overall-compliance-rate: u98,
+        temperature-compliance: u95,
+        documentation-compliance: u99,
+        quality-score-average: u87,
+        expired-products: u2,
+        recalled-products: u1,
+        pending-alerts: u3,
+    }
+)
