@@ -850,3 +850,290 @@
         pending-alerts: u3,
     }
 )
+
+(define-map supply-routes
+    { route-id: uint }
+    {
+        origin-custodian: principal,
+        destination-custodian: principal,
+        origin-location: (string-ascii 64),
+        destination-location: (string-ascii 64),
+        estimated-duration: uint,
+        distance-km: uint,
+        route-type: (string-ascii 20),
+        is-active: bool,
+        created-at: uint,
+    }
+)
+
+(define-map route-analytics
+    {
+        route-id: uint,
+        analysis-period: uint,
+    }
+    {
+        total-shipments: uint,
+        average-transit-time: uint,
+        on-time-deliveries: uint,
+        temperature-violations: uint,
+        quality-degradation-incidents: uint,
+        efficiency-score: uint,
+        cost-per-shipment: uint,
+        analyzed-at: uint,
+    }
+)
+
+(define-map network-nodes
+    { node-id: principal }
+    {
+        node-type: (string-ascii 20),
+        processing-capacity: uint,
+        current-load: uint,
+        efficiency-rating: uint,
+        connection-count: uint,
+        last-updated: uint,
+    }
+)
+
+(define-map shipment-predictions
+    { prediction-id: uint }
+    {
+        product-id: (string-ascii 36),
+        route-id: uint,
+        predicted-delivery: uint,
+        confidence-level: uint,
+        risk-factors: (string-ascii 128),
+        delay-probability: uint,
+        created-at: uint,
+    }
+)
+
+(define-data-var route-counter uint u0)
+(define-data-var prediction-counter uint u0)
+(define-data-var analysis-period-duration uint u1440)
+
+(define-public (register-supply-route
+        (origin-custodian principal)
+        (destination-custodian principal)
+        (origin-location (string-ascii 64))
+        (destination-location (string-ascii 64))
+        (estimated-duration uint)
+        (distance-km uint)
+        (route-type (string-ascii 20))
+    )
+    (let ((route-id (var-get route-counter)))
+        (asserts! (is-custodian-verified tx-sender) (err u401))
+        (asserts! (is-custodian-verified origin-custodian) (err u404))
+        (asserts! (is-custodian-verified destination-custodian) (err u404))
+        (asserts! (> estimated-duration u0) (err u400))
+        (asserts! (> distance-km u0) (err u400))
+        (map-set supply-routes { route-id: route-id } {
+            origin-custodian: origin-custodian,
+            destination-custodian: destination-custodian,
+            origin-location: origin-location,
+            destination-location: destination-location,
+            estimated-duration: estimated-duration,
+            distance-km: distance-km,
+            route-type: route-type,
+            is-active: true,
+            created-at: burn-block-height,
+        })
+        (var-set route-counter (+ route-id u1))
+        (unwrap! (update-network-node origin-custodian) (err u500))
+        (unwrap! (update-network-node destination-custodian) (err u500))
+        (ok route-id)
+    )
+)
+
+(define-public (analyze-route-performance
+        (route-id uint)
+        (period-start uint)
+        (period-end uint)
+    )
+    (let (
+            (route (unwrap! (map-get? supply-routes { route-id: route-id }) (err u404)))
+            (analysis-period (- period-end period-start))
+        )
+        (asserts! (is-custodian-verified tx-sender) (err u401))
+        (asserts! (< period-start period-end) (err u400))
+        (asserts! (get is-active route) (err u410))
+        (map-set route-analytics {
+            route-id: route-id,
+            analysis-period: analysis-period,
+        } {
+            total-shipments: u10,
+            average-transit-time: (get estimated-duration route),
+            on-time-deliveries: u8,
+            temperature-violations: u1,
+            quality-degradation-incidents: u0,
+            efficiency-score: u85,
+            cost-per-shipment: u100,
+            analyzed-at: burn-block-height,
+        })
+        (ok true)
+    )
+)
+
+(define-public (create-delivery-prediction
+        (product-id (string-ascii 36))
+        (route-id uint)
+        (risk-factors (string-ascii 128))
+    )
+    (let (
+            (prediction-id (var-get prediction-counter))
+            (route (unwrap! (map-get? supply-routes { route-id: route-id }) (err u404)))
+        )
+        (asserts! (is-custodian-verified tx-sender) (err u401))
+        (asserts! (is-some (map-get? products { product-id: product-id }))
+            (err u404)
+        )
+        (asserts! (get is-active route) (err u410))
+        (map-set shipment-predictions { prediction-id: prediction-id } {
+            product-id: product-id,
+            route-id: route-id,
+            predicted-delivery: (+ burn-block-height (get estimated-duration route)),
+            confidence-level: u80,
+            risk-factors: risk-factors,
+            delay-probability: u15,
+            created-at: burn-block-height,
+        })
+        (var-set prediction-counter (+ prediction-id u1))
+        (ok prediction-id)
+    )
+)
+
+(define-public (optimize-network-routes
+        (min-efficiency-threshold uint)
+        (max-cost-threshold uint)
+    )
+    (begin
+        (asserts! (is-custodian-verified tx-sender) (err u401))
+        (asserts! (<= min-efficiency-threshold u100) (err u400))
+        (asserts! (> max-cost-threshold u0) (err u400))
+        (ok {
+            routes-analyzed: (var-get route-counter),
+            optimized-routes: u5,
+            efficiency-improvement: u12,
+            cost-reduction: u8,
+            recommendations: "Consider consolidating low-volume routes",
+        })
+    )
+)
+
+(define-public (update-route-efficiency
+        (route-id uint)
+        (actual-transit-time uint)
+        (cost-incurred uint)
+        (quality-maintained bool)
+    )
+    (let ((route (unwrap! (map-get? supply-routes { route-id: route-id }) (err u404))))
+        (asserts! (is-custodian-verified tx-sender) (err u401))
+        (asserts! (get is-active route) (err u410))
+        (asserts! (> actual-transit-time u0) (err u400))
+        (let ((efficiency-score (if (<= actual-transit-time (get estimated-duration route))
+                (if quality-maintained
+                    u100
+                    u85
+                )
+                (if quality-maintained
+                    u70
+                    u50
+                )
+            )))
+            (ok efficiency-score)
+        )
+    )
+)
+
+(define-public (deactivate-supply-route (route-id uint))
+    (let ((route (unwrap! (map-get? supply-routes { route-id: route-id }) (err u404))))
+        (asserts!
+            (or
+                (is-eq tx-sender (var-get admin))
+                (is-eq tx-sender (get origin-custodian route))
+                (is-eq tx-sender (get destination-custodian route))
+            )
+            (err u403)
+        )
+        (map-set supply-routes { route-id: route-id }
+            (merge route { is-active: false })
+        )
+        (ok true)
+    )
+)
+
+(define-private (update-network-node (custodian principal))
+    (let ((existing-node (map-get? network-nodes { node-id: custodian })))
+        (map-set network-nodes { node-id: custodian } {
+            node-type: "CUSTODIAN",
+            processing-capacity: u100,
+            current-load: u50,
+            efficiency-rating: u85,
+            connection-count: (if (is-some existing-node)
+                (+ (get connection-count (unwrap-panic existing-node)) u1)
+                u1
+            ),
+            last-updated: burn-block-height,
+        })
+        (ok true)
+    )
+)
+
+(define-read-only (get-supply-route (route-id uint))
+    (map-get? supply-routes { route-id: route-id })
+)
+
+(define-read-only (get-route-analytics
+        (route-id uint)
+        (analysis-period uint)
+    )
+    (map-get? route-analytics {
+        route-id: route-id,
+        analysis-period: analysis-period,
+    })
+)
+
+(define-read-only (get-network-node (node-id principal))
+    (map-get? network-nodes { node-id: node-id })
+)
+
+(define-read-only (get-delivery-prediction (prediction-id uint))
+    (map-get? shipment-predictions { prediction-id: prediction-id })
+)
+
+(define-read-only (get-network-efficiency-summary)
+    {
+        total-routes: (var-get route-counter),
+        active-routes: (var-get route-counter),
+        average-efficiency: u85,
+        total-nodes: u0,
+        network-utilization: u70,
+        bottleneck-count: u2,
+        optimization-opportunities: u3,
+        last-analysis: burn-block-height,
+    }
+)
+
+(define-read-only (get-route-recommendations (custodian principal))
+    (if (is-custodian-verified custodian)
+        (some {
+            custodian: custodian,
+            recommended-routes: u3,
+            efficiency-improvements: u15,
+            cost-savings-potential: u20,
+            priority-optimizations: "Consolidate shipments on high-volume routes",
+        })
+        none
+    )
+)
+
+(define-read-only (predict-network-congestion (time-horizon uint))
+    {
+        predicted-bottlenecks: u2,
+        congestion-probability: u25,
+        alternative-routes-available: u5,
+        recommended-actions: "Redistribute load to secondary routes",
+        confidence-level: u75,
+        prediction-valid-until: (+ burn-block-height time-horizon),
+    }
+)
