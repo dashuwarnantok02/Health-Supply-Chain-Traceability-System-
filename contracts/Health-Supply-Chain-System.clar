@@ -49,6 +49,22 @@
 
 (define-data-var history-counter uint u0)
 
+(define-private (is-valid-string (str (string-ascii 256)))
+    (> (len str) u0)
+)
+
+(define-private (validate-principal (p principal))
+    (not (is-eq p tx-sender))
+)
+
+(define-private (validate-uint-range
+        (value uint)
+        (min-val uint)
+        (max-val uint)
+    )
+    (and (>= value min-val) (<= value max-val))
+)
+
 (define-read-only (get-admin)
     (var-get admin)
 )
@@ -56,6 +72,7 @@
 (define-public (set-admin (new-admin principal))
     (begin
         (asserts! (is-eq tx-sender (var-get admin)) (err u403))
+        (asserts! (not (is-eq new-admin tx-sender)) (err u400))
         (ok (var-set admin new-admin))
     )
 )
@@ -65,6 +82,8 @@
         (role (string-ascii 20))
     )
     (begin
+        (asserts! (> (len name) u0) (err u400))
+        (asserts! (> (len role) u0) (err u400))
         (asserts!
             (or (is-eq tx-sender (var-get admin)) (is-none (map-get? custodians { custodian-id: tx-sender })))
             (err u401)
@@ -79,15 +98,11 @@
 )
 
 (define-public (verify-custodian (custodian principal))
-    (begin
+    (let ((existing-custodian (unwrap! (map-get? custodians { custodian-id: custodian }) (err u404))))
         (asserts! (is-eq tx-sender (var-get admin)) (err u403))
-        (asserts! (is-some (map-get? custodians { custodian-id: custodian }))
-            (err u404)
-        )
         (map-set custodians { custodian-id: custodian }
-            (merge
-                (unwrap-panic (map-get? custodians { custodian-id: custodian })) { is-verified: true }
-            ))
+            (merge existing-custodian { is-verified: true })
+        )
         (ok true)
     )
 )
@@ -99,6 +114,10 @@
         (location-type (string-ascii 20))
     )
     (begin
+        (asserts! (> (len location-id) u0) (err u400))
+        (asserts! (> (len name) u0) (err u400))
+        (asserts! (> (len address) u0) (err u400))
+        (asserts! (> (len location-type) u0) (err u400))
         (asserts! (is-custodian-verified tx-sender) (err u401))
         (map-set locations { location-id: location-id } {
             name: name,
@@ -117,6 +136,10 @@
         (batch-number (string-ascii 36))
     )
     (begin
+        (asserts! (> (len product-id) u0) (err u400))
+        (asserts! (> (len name) u0) (err u400))
+        (asserts! (> (len batch-number) u0) (err u400))
+        (asserts! (< manufacturing-date expiry-date) (err u400))
         (asserts! (is-custodian-verified tx-sender) (err u401))
         (asserts! (is-none (map-get? products { product-id: product-id }))
             (err u409)
@@ -163,6 +186,10 @@
     (let (
             (product (unwrap! (map-get? products { product-id: product-id }) (err u404)))
             (counter (var-get history-counter))
+            (validated-location (begin
+                (asserts! (is-valid-string location) (err u400))
+                location
+            ))
         )
         (asserts! (is-custodian-verified tx-sender) (err u401))
         (asserts! (get is-active product) (err u410))
@@ -172,7 +199,7 @@
         } {
             timestamp: burn-block-height,
             custodian: custodian,
-            location: location,
+            location: validated-location,
             temperature: temperature,
             action: "TRANSFER",
         })
@@ -191,6 +218,14 @@
     (let (
             (product (unwrap! (map-get? products { product-id: product-id }) (err u404)))
             (counter (var-get history-counter))
+            (validated-location (begin
+                (asserts! (is-valid-string location) (err u400))
+                location
+            ))
+            (validated-action (begin
+                (asserts! (is-valid-string action) (err u400))
+                action
+            ))
         )
         (asserts! (is-custodian-verified tx-sender) (err u401))
         (asserts! (get is-active product) (err u410))
@@ -200,9 +235,9 @@
         } {
             timestamp: burn-block-height,
             custodian: custodian,
-            location: location,
+            location: validated-location,
             temperature: temperature,
-            action: action,
+            action: validated-action,
         })
         (var-set history-counter (+ counter u1))
         (ok true)
@@ -284,11 +319,20 @@
         (name (string-ascii 64))
         (certification (string-ascii 64))
     )
-    (begin
+    (let (
+            (validated-name (begin
+                (asserts! (is-valid-string name) (err u400))
+                name
+            ))
+            (validated-cert (begin
+                (asserts! (is-valid-string certification) (err u400))
+                certification
+            ))
+        )
         (asserts! (is-eq tx-sender (var-get admin)) (err u403))
         (map-set quality-inspectors { inspector-id: inspector } {
-            name: name,
-            certification: certification,
+            name: validated-name,
+            certification: validated-cert,
             is-active: true,
         })
         (ok true)
