@@ -1,0 +1,23 @@
+[project]
+name = 'Health-Supply-Chain-System'
+description = ''
+authors = []
+telemetry = true
+cache_dir = '.\.cache'
+requirements = []
+[contracts.Health-Supply-Chain-System]
+path = 'contracts/Health-Supply-Chain-System.clar'
+clarity_version = 3
+epoch = 3.1
+[repl.analysis]
+passes = ['check_checker']
+
+[repl.analysis.check_checker]
+strict = false
+trusted_sender = false
+trusted_caller = false
+callee_filter = false
+
+[repl.remote_data]
+enabled = false
+api_url = 'https://api.hiro.so'
