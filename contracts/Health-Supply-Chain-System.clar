@@ -567,10 +567,13 @@
     (let (
             (certificate-id (var-get certificate-counter))
             (product (unwrap! (map-get? products { product-id: product-id }) (err u404)))
-            (assessment (unwrap! (map-get? quality-assessments {
-                product-id: product-id,
-                assessment-id: assessment-id,
-            }) (err u404)))
+            (assessment (unwrap!
+                (map-get? quality-assessments {
+                    product-id: product-id,
+                    assessment-id: assessment-id,
+                })
+                (err u404)
+            ))
             (quality-score (get quality-score assessment))
             (compliance-status (get compliance-status assessment))
             (current-timestamp burn-block-height)
@@ -581,11 +584,15 @@
         )
         (asserts! (is-certificate-authority tx-sender) (err u401))
         (asserts! (get is-active product) (err u410))
-        (asserts! (>= quality-score u80) (err u400)) ;; Minimum quality score for certification
-        (asserts! (or
-            (is-eq compliance-status "COMPLIANT")
-            (is-eq compliance-status "APPROVED")
-        ) (err u400))
+        (asserts! (>= quality-score u80) (err u400))
+        ;; Minimum quality score for certification
+        (asserts!
+            (or
+                (is-eq compliance-status "COMPLIANT")
+                (is-eq compliance-status "APPROVED")
+            )
+            (err u400)
+        )
         (asserts! (is-valid-string certificate-type) (err u400))
         (map-set product-certificates { certificate-id: certificate-id } {
             product-id: product-id,
@@ -609,7 +616,10 @@
         (expected-verification-code (string-ascii 12))
     )
     (let (
-            (certificate (unwrap! (map-get? product-certificates { certificate-id: certificate-id }) (err u404)))
+            (certificate (unwrap!
+                (map-get? product-certificates { certificate-id: certificate-id })
+                (err u404)
+            ))
             (verification-id (var-get verification-counter))
             (stored-verification-code (get verification-code certificate))
             (is-valid (and
@@ -617,7 +627,10 @@
                 (get is-active certificate)
                 (> (get valid-until certificate) burn-block-height)
             ))
-            (verification-result (if is-valid "VALID" "INVALID"))
+            (verification-result (if is-valid
+                "VALID"
+                "INVALID"
+            ))
         )
         (asserts! (is-custodian-verified tx-sender) (err u401))
         (map-set certificate-verifications { verification-id: verification-id } {
@@ -634,13 +647,19 @@
         (ok {
             verification-id: verification-id,
             is-valid: is-valid,
-            certificate-data: (if is-valid (some certificate) none),
+            certificate-data: (if is-valid
+                (some certificate)
+                none
+            ),
         })
     )
 )
 
 (define-public (revoke-product-certificate (certificate-id uint))
-    (let ((certificate (unwrap! (map-get? product-certificates { certificate-id: certificate-id }) (err u404))))
+    (let ((certificate (unwrap!
+            (map-get? product-certificates { certificate-id: certificate-id })
+            (err u404)
+        )))
         (asserts!
             (or
                 (is-eq tx-sender (var-get admin))
@@ -670,7 +689,10 @@
         ;; For demonstration, we'll return a summary of the bulk operation
         (let (
                 (estimated-products u5) ;; Mock number of products in batch
-                (eligible-products (if (>= min-quality-threshold u80) estimated-products u3))
+                (eligible-products (if (>= min-quality-threshold u80)
+                    estimated-products
+                    u3
+                ))
                 (issued-certificates eligible-products)
             )
             (ok {
@@ -695,7 +717,9 @@
 )
 
 (define-public (deauthorize-certificate-authority (authority principal))
-    (let ((authority-data (unwrap! (map-get? certificate-authorities { authority-id: authority }) (err u404))))
+    (let ((authority-data (unwrap! (map-get? certificate-authorities { authority-id: authority })
+            (err u404)
+        )))
         (asserts! (is-eq tx-sender (var-get admin)) (err u403))
         (map-set certificate-authorities { authority-id: authority }
             (merge authority-data { is-authorized: false })
@@ -727,7 +751,10 @@
     (let (
             (certificate-count (var-get certificate-counter))
             ;; In a real implementation, this would count actual certificates for the product
-            (active-certificates (if (> certificate-count u0) u1 u0))
+            (active-certificates (if (> certificate-count u0)
+                u1
+                u0
+            ))
             (expired-certificates u0)
             (revoked-certificates u0)
         )
@@ -790,7 +817,12 @@
                 (is-code-match (is-eq (get verification-code certificate) verification-code))
                 (is-active (get is-active certificate))
                 (is-not-expired (> (get valid-until certificate) burn-block-height))
-                (is-authentic (and is-product-match is-code-match is-active is-not-expired))
+                (is-authentic (and
+                    is-product-match
+                    is-code-match
+                    is-active
+                    is-not-expired
+                ))
             )
             (some {
                 certificate-id: certificate-id,
@@ -1728,6 +1760,111 @@
         confidence-level: u75,
         prediction-valid-until: (+ burn-block-height time-horizon),
     }
+)
+
+(define-map batch-data-anchors
+    { batch-number: (string-ascii 36) }
+    {
+        merkle-root: (buff 32),
+        schema: (string-ascii 64),
+        anchored-at: uint,
+        anchored-by: principal,
+        is-active: bool,
+    }
+)
+
+(define-public (anchor-batch-data
+        (batch-number (string-ascii 36))
+        (merkle-root (buff 32))
+        (schema (string-ascii 64))
+    )
+    (begin
+        (asserts! (is-custodian-verified tx-sender) (err u401))
+        (asserts! (is-valid-string batch-number) (err u400))
+        (asserts! (is-valid-string schema) (err u400))
+        (map-set batch-data-anchors { batch-number: batch-number } {
+            merkle-root: merkle-root,
+            schema: schema,
+            anchored-at: burn-block-height,
+            anchored-by: tx-sender,
+            is-active: true,
+        })
+        (ok true)
+    )
+)
+
+(define-public (deactivate-batch-anchor (batch-number (string-ascii 36)))
+    (let ((entry (unwrap! (map-get? batch-data-anchors { batch-number: batch-number })
+            (err u404)
+        )))
+        (asserts!
+            (or (is-eq tx-sender (var-get admin)) (is-eq tx-sender (get anchored-by entry)))
+            (err u403)
+        )
+        (map-set batch-data-anchors { batch-number: batch-number }
+            (merge entry { is-active: false })
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-batch-anchor (batch-number (string-ascii 36)))
+    (map-get? batch-data-anchors { batch-number: batch-number })
+)
+
+(define-private (merkle-combine
+        (left (buff 32))
+        (right (buff 32))
+    )
+    (sha256 (concat left right))
+)
+
+(define-private (merkle-step
+        (sib (buff 32))
+        (acc {
+            hash: (buff 32),
+            index: uint,
+        })
+    )
+    (let (
+            (is-right (is-eq (mod (get index acc) u2) u1))
+            (new-hash (if is-right
+                (merkle-combine sib (get hash acc))
+                (merkle-combine (get hash acc) sib)
+            ))
+            (new-index (/ (get index acc) u2))
+        )
+        {
+            hash: new-hash,
+            index: new-index,
+        }
+    )
+)
+
+(define-read-only (verify-batch-leaf
+        (batch-number (string-ascii 36))
+        (leaf (buff 32))
+        (proof (list 12 (buff 32)))
+        (index uint)
+    )
+    (match (map-get? batch-data-anchors { batch-number: batch-number })
+        entry (let (
+                (acc (fold merkle-step proof {
+                    hash: leaf,
+                    index: index,
+                }))
+                (computed (get hash acc))
+                (valid (and (get is-active entry) (is-eq computed (get merkle-root entry))))
+            )
+            (some {
+                valid: valid,
+                computed-root: computed,
+                anchored-root: (get merkle-root entry),
+                is-active: (get is-active entry),
+            })
+        )
+        none
+    )
 )
 
 (define-map contamination-zones
@@ -2915,7 +3052,8 @@
         (asserts! (< min-temp max-temp) (err u400))
         (asserts! (validate-temperature min-temp) (err u400))
         (asserts! (validate-temperature max-temp) (err u400))
-        (asserts! (is-none (map-get? batch-temperature-profiles { batch-number: batch-number }))
+        (asserts!
+            (is-none (map-get? batch-temperature-profiles { batch-number: batch-number }))
             (err u409)
         )
         (map-set batch-temperature-profiles { batch-number: batch-number } {
@@ -2941,12 +3079,15 @@
         (location (string-ascii 64))
     )
     (let (
-            (profile (unwrap! (map-get? batch-temperature-profiles { batch-number: batch-number }) (err u404)))
+            (profile (unwrap!
+                (map-get? batch-temperature-profiles { batch-number: batch-number })
+                (err u404)
+            ))
             (min-temp (get temperature-range-min profile))
             (max-temp (get temperature-range-max profile))
             (is-compliant (and (>= temperature min-temp) (<= temperature max-temp)))
             (new-total (+ (get total-readings profile) u1))
-            (new-compliant (if is-compliant 
+            (new-compliant (if is-compliant
                 (+ (get compliant-readings profile) u1)
                 (get compliant-readings profile)
             ))
@@ -2959,8 +3100,14 @@
                 u100
             ))
             (new-avg-temp (if (> new-total u0)
-                (/ (+ (* (get average-temperature profile) (to-int (get total-readings profile))) temperature)
-                   (to-int new-total)
+                (/
+                    (+
+                        (* (get average-temperature profile)
+                            (to-int (get total-readings profile))
+                        )
+                        temperature
+                    )
+                    (to-int new-total)
                 )
                 temperature
             ))
@@ -2969,8 +3116,10 @@
         (asserts! (is-custodian-verified tx-sender) (err u401))
         (asserts! (get monitoring-active profile) (err u410))
         (asserts! (validate-temperature temperature) (err u400))
-        (asserts! (is-some (map-get? products { product-id: product-id })) (err u404))
-        
+        (asserts! (is-some (map-get? products { product-id: product-id }))
+            (err u404)
+        )
+
         ;; Update batch temperature profile
         (map-set batch-temperature-profiles { batch-number: batch-number }
             (merge profile {
@@ -2983,33 +3132,38 @@
                 risk-classification: risk-class,
             })
         )
-        
-        ;; Record violation if temperature is non-compliant
-        (if (not is-compliant)
-            (let ((violation-result (record-temperature-violation batch-number product-id temperature location)))
-                violation-result
+
+        (unwrap!
+            (if (not is-compliant)
+                (record-temperature-violation batch-number product-id temperature
+                    location
+                )
+                (ok u0)
             )
-            (ok u0)
+            (err u500)
         )
-        
-        ;; Generate alert if critical temperature is reached
-        (if (or 
-                (< temperature (var-get critical-temperature-min))
-                (> temperature (var-get critical-temperature-max))
+
+        (unwrap!
+            (if (or
+                    (< temperature (var-get critical-temperature-min))
+                    (> temperature (var-get critical-temperature-max))
+                )
+                (generate-critical-temperature-alert batch-number temperature)
+                (ok u0)
             )
-            (let ((alert-result (generate-critical-temperature-alert batch-number temperature)))
-                alert-result
-            )
-            (ok u0)
+            (err u500)
         )
-        
+
         (ok new-compliance-pct)
     )
 )
 
 (define-public (calculate-batch-compliance-score (batch-number (string-ascii 36)))
     (let (
-            (profile (unwrap! (map-get? batch-temperature-profiles { batch-number: batch-number }) (err u404)))
+            (profile (unwrap!
+                (map-get? batch-temperature-profiles { batch-number: batch-number })
+                (err u404)
+            ))
             (temp-score (get compliance-percentage profile))
             (duration-score (calculate-duration-score batch-number))
             (consistency-score (calculate-consistency-score batch-number))
@@ -3036,10 +3190,13 @@
         (violation-id uint)
         (corrective-action (string-ascii 128))
     )
-    (let ((violation (unwrap! (map-get? batch-temperature-violations {
-            batch-number: batch-number,
-            violation-id: violation-id,
-        }) (err u404))))
+    (let ((violation (unwrap!
+            (map-get? batch-temperature-violations {
+                batch-number: batch-number,
+                violation-id: violation-id,
+            })
+            (err u404)
+        )))
         (asserts! (is-custodian-verified tx-sender) (err u401))
         (asserts! (not (get resolved violation)) (err u410))
         (asserts! (is-valid-string corrective-action) (err u400))
@@ -3066,7 +3223,10 @@
 )
 
 (define-public (suspend-batch-temperature-monitoring (batch-number (string-ascii 36)))
-    (let ((profile (unwrap! (map-get? batch-temperature-profiles { batch-number: batch-number }) (err u404))))
+    (let ((profile (unwrap!
+            (map-get? batch-temperature-profiles { batch-number: batch-number })
+            (err u404)
+        )))
         (asserts!
             (or (is-eq tx-sender (var-get admin)) (is-custodian-verified tx-sender))
             (err u403)
@@ -3112,7 +3272,10 @@
             batch-number: batch-number,
             alert-type: "CRITICAL_TEMP",
             temperature-reading: temperature,
-            threshold-exceeded: (if (< temperature (var-get critical-temperature-min)) "MIN" "MAX"),
+            threshold-exceeded: (if (< temperature (var-get critical-temperature-min))
+                "MIN"
+                "MAX"
+            ),
             urgency-level: "HIGH",
             auto-generated: true,
             timestamp: burn-block-height,
@@ -3275,7 +3438,14 @@
 (define-private (count-unresolved-violations (batch-number (string-ascii 36)))
     (get count
         (fold count-unresolved-violations-for-batch
-            (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 u16 u17 u18 u19) {
+            (list
+                u0                 u1                 u2                 u3
+                                u4                 u5                 u6                 u7
+                                u8                 u9                 u10                 u11
+                                u12                 u13                 u14                 u15
+                                u16                 u17
+                u18                 u19
+            ) {
             batch: batch-number,
             count: u0,
         })
