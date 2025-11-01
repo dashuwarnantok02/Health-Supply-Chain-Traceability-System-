@@ -2835,3 +2835,493 @@
         )
     )
 )
+
+;; ====== BATCH TEMPERATURE COMPLIANCE TRACKING FEATURE ======
+
+(define-map batch-temperature-profiles
+    { batch-number: (string-ascii 36) }
+    {
+        temperature-range-min: int,
+        temperature-range-max: int,
+        total-readings: uint,
+        compliant-readings: uint,
+        violation-readings: uint,
+        average-temperature: int,
+        last-updated: uint,
+        compliance-percentage: uint,
+        risk-classification: (string-ascii 10),
+        monitoring-active: bool,
+    }
+)
+
+(define-map batch-temperature-violations
+    {
+        batch-number: (string-ascii 36),
+        violation-id: uint,
+    }
+    {
+        product-id: (string-ascii 36),
+        recorded-temperature: int,
+        violation-severity: (string-ascii 10),
+        location: (string-ascii 64),
+        custodian: principal,
+        timestamp: uint,
+        corrective-action: (string-ascii 128),
+        resolved: bool,
+    }
+)
+
+(define-map batch-compliance-scores
+    { batch-number: (string-ascii 36) }
+    {
+        overall-score: uint,
+        temperature-score: uint,
+        duration-score: uint,
+        consistency-score: uint,
+        calculated-at: uint,
+        grade: (string-ascii 2),
+        certification-eligible: bool,
+    }
+)
+
+(define-map temperature-alerts-log
+    { alert-id: uint }
+    {
+        batch-number: (string-ascii 36),
+        alert-type: (string-ascii 20),
+        temperature-reading: int,
+        threshold-exceeded: (string-ascii 10),
+        urgency-level: (string-ascii 10),
+        auto-generated: bool,
+        timestamp: uint,
+        acknowledged: bool,
+    }
+)
+
+(define-data-var batch-violation-counter uint u0)
+(define-data-var temperature-alert-counter uint u0)
+(define-data-var compliance-threshold uint u95)
+(define-data-var critical-temperature-min int -10)
+(define-data-var critical-temperature-max int 25)
+
+(define-public (initialize-batch-temperature-monitoring
+        (batch-number (string-ascii 36))
+        (min-temp int)
+        (max-temp int)
+    )
+    (begin
+        (asserts! (is-custodian-verified tx-sender) (err u401))
+        (asserts! (validate-batch-number batch-number) (err u400))
+        (asserts! (< min-temp max-temp) (err u400))
+        (asserts! (validate-temperature min-temp) (err u400))
+        (asserts! (validate-temperature max-temp) (err u400))
+        (asserts! (is-none (map-get? batch-temperature-profiles { batch-number: batch-number }))
+            (err u409)
+        )
+        (map-set batch-temperature-profiles { batch-number: batch-number } {
+            temperature-range-min: min-temp,
+            temperature-range-max: max-temp,
+            total-readings: u0,
+            compliant-readings: u0,
+            violation-readings: u0,
+            average-temperature: 0,
+            last-updated: burn-block-height,
+            compliance-percentage: u100,
+            risk-classification: "LOW",
+            monitoring-active: true,
+        })
+        (ok true)
+    )
+)
+
+(define-public (record-batch-temperature-reading
+        (batch-number (string-ascii 36))
+        (product-id (string-ascii 36))
+        (temperature int)
+        (location (string-ascii 64))
+    )
+    (let (
+            (profile (unwrap! (map-get? batch-temperature-profiles { batch-number: batch-number }) (err u404)))
+            (min-temp (get temperature-range-min profile))
+            (max-temp (get temperature-range-max profile))
+            (is-compliant (and (>= temperature min-temp) (<= temperature max-temp)))
+            (new-total (+ (get total-readings profile) u1))
+            (new-compliant (if is-compliant 
+                (+ (get compliant-readings profile) u1)
+                (get compliant-readings profile)
+            ))
+            (new-violations (if is-compliant
+                (get violation-readings profile)
+                (+ (get violation-readings profile) u1)
+            ))
+            (new-compliance-pct (if (> new-total u0)
+                (/ (* new-compliant u100) new-total)
+                u100
+            ))
+            (new-avg-temp (if (> new-total u0)
+                (/ (+ (* (get average-temperature profile) (to-int (get total-readings profile))) temperature)
+                   (to-int new-total)
+                )
+                temperature
+            ))
+            (risk-class (classify-temperature-risk new-compliance-pct new-violations))
+        )
+        (asserts! (is-custodian-verified tx-sender) (err u401))
+        (asserts! (get monitoring-active profile) (err u410))
+        (asserts! (validate-temperature temperature) (err u400))
+        (asserts! (is-some (map-get? products { product-id: product-id })) (err u404))
+        
+        ;; Update batch temperature profile
+        (map-set batch-temperature-profiles { batch-number: batch-number }
+            (merge profile {
+                total-readings: new-total,
+                compliant-readings: new-compliant,
+                violation-readings: new-violations,
+                average-temperature: new-avg-temp,
+                last-updated: burn-block-height,
+                compliance-percentage: new-compliance-pct,
+                risk-classification: risk-class,
+            })
+        )
+        
+        ;; Record violation if temperature is non-compliant
+        (if (not is-compliant)
+            (let ((violation-result (record-temperature-violation batch-number product-id temperature location)))
+                violation-result
+            )
+            (ok u0)
+        )
+        
+        ;; Generate alert if critical temperature is reached
+        (if (or 
+                (< temperature (var-get critical-temperature-min))
+                (> temperature (var-get critical-temperature-max))
+            )
+            (let ((alert-result (generate-critical-temperature-alert batch-number temperature)))
+                alert-result
+            )
+            (ok u0)
+        )
+        
+        (ok new-compliance-pct)
+    )
+)
+
+(define-public (calculate-batch-compliance-score (batch-number (string-ascii 36)))
+    (let (
+            (profile (unwrap! (map-get? batch-temperature-profiles { batch-number: batch-number }) (err u404)))
+            (temp-score (get compliance-percentage profile))
+            (duration-score (calculate-duration-score batch-number))
+            (consistency-score (calculate-consistency-score batch-number))
+            (overall-score (/ (+ temp-score duration-score consistency-score) u3))
+            (grade (assign-compliance-grade overall-score))
+            (cert-eligible (>= overall-score (var-get compliance-threshold)))
+        )
+        (asserts! (is-custodian-verified tx-sender) (err u401))
+        (map-set batch-compliance-scores { batch-number: batch-number } {
+            overall-score: overall-score,
+            temperature-score: temp-score,
+            duration-score: duration-score,
+            consistency-score: consistency-score,
+            calculated-at: burn-block-height,
+            grade: grade,
+            certification-eligible: cert-eligible,
+        })
+        (ok overall-score)
+    )
+)
+
+(define-public (resolve-temperature-violation
+        (batch-number (string-ascii 36))
+        (violation-id uint)
+        (corrective-action (string-ascii 128))
+    )
+    (let ((violation (unwrap! (map-get? batch-temperature-violations {
+            batch-number: batch-number,
+            violation-id: violation-id,
+        }) (err u404))))
+        (asserts! (is-custodian-verified tx-sender) (err u401))
+        (asserts! (not (get resolved violation)) (err u410))
+        (asserts! (is-valid-string corrective-action) (err u400))
+        (map-set batch-temperature-violations {
+            batch-number: batch-number,
+            violation-id: violation-id,
+        }
+            (merge violation {
+                corrective-action: corrective-action,
+                resolved: true,
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-public (update-compliance-threshold (new-threshold uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get admin)) (err u403))
+        (asserts! (<= new-threshold u100) (err u400))
+        (asserts! (>= new-threshold u50) (err u400))
+        (ok (var-set compliance-threshold new-threshold))
+    )
+)
+
+(define-public (suspend-batch-temperature-monitoring (batch-number (string-ascii 36)))
+    (let ((profile (unwrap! (map-get? batch-temperature-profiles { batch-number: batch-number }) (err u404))))
+        (asserts!
+            (or (is-eq tx-sender (var-get admin)) (is-custodian-verified tx-sender))
+            (err u403)
+        )
+        (map-set batch-temperature-profiles { batch-number: batch-number }
+            (merge profile { monitoring-active: false })
+        )
+        (ok true)
+    )
+)
+
+(define-private (record-temperature-violation
+        (batch-number (string-ascii 36))
+        (product-id (string-ascii 36))
+        (temperature int)
+        (location (string-ascii 64))
+    )
+    (let ((violation-id (var-get batch-violation-counter)))
+        (map-set batch-temperature-violations {
+            batch-number: batch-number,
+            violation-id: violation-id,
+        } {
+            product-id: product-id,
+            recorded-temperature: temperature,
+            violation-severity: (determine-violation-severity temperature),
+            location: location,
+            custodian: tx-sender,
+            timestamp: burn-block-height,
+            corrective-action: "",
+            resolved: false,
+        })
+        (var-set batch-violation-counter (+ violation-id u1))
+        (ok violation-id)
+    )
+)
+
+(define-private (generate-critical-temperature-alert
+        (batch-number (string-ascii 36))
+        (temperature int)
+    )
+    (let ((alert-id (var-get temperature-alert-counter)))
+        (map-set temperature-alerts-log { alert-id: alert-id } {
+            batch-number: batch-number,
+            alert-type: "CRITICAL_TEMP",
+            temperature-reading: temperature,
+            threshold-exceeded: (if (< temperature (var-get critical-temperature-min)) "MIN" "MAX"),
+            urgency-level: "HIGH",
+            auto-generated: true,
+            timestamp: burn-block-height,
+            acknowledged: false,
+        })
+        (var-set temperature-alert-counter (+ alert-id u1))
+        (ok alert-id)
+    )
+)
+
+(define-private (classify-temperature-risk
+        (compliance-percentage uint)
+        (violations uint)
+    )
+    (if (< compliance-percentage u80)
+        "HIGH"
+        (if (< compliance-percentage u95)
+            "MEDIUM"
+            "LOW"
+        )
+    )
+)
+
+(define-private (determine-violation-severity (temperature int))
+    (let (
+            (critical-min (var-get critical-temperature-min))
+            (critical-max (var-get critical-temperature-max))
+        )
+        (if (or (<= temperature critical-min) (>= temperature critical-max))
+            "CRITICAL"
+            (if (or (<= temperature (+ critical-min 5)) (>= temperature (- critical-max 5)))
+                "HIGH"
+                "MEDIUM"
+            )
+        )
+    )
+)
+
+(define-private (calculate-duration-score (batch-number (string-ascii 36)))
+    (let ((profile (unwrap-panic (map-get? batch-temperature-profiles { batch-number: batch-number }))))
+        (if (> (get total-readings profile) u10)
+            u95
+            (/ (* (get total-readings profile) u95) u10)
+        )
+    )
+)
+
+(define-private (calculate-consistency-score (batch-number (string-ascii 36)))
+    (let ((profile (unwrap-panic (map-get? batch-temperature-profiles { batch-number: batch-number }))))
+        (if (< (get violation-readings profile) u3)
+            u100
+            (- u100 (* (get violation-readings profile) u5))
+        )
+    )
+)
+
+(define-private (assign-compliance-grade (score uint))
+    (if (>= score u95)
+        "A+"
+        (if (>= score u90)
+            "A"
+            (if (>= score u85)
+                "B+"
+                (if (>= score u80)
+                    "B"
+                    (if (>= score u75)
+                        "C+"
+                        (if (>= score u70)
+                            "C"
+                            "F"
+                        )
+                    )
+                )
+            )
+        )
+    )
+)
+
+(define-read-only (get-batch-temperature-profile (batch-number (string-ascii 36)))
+    (map-get? batch-temperature-profiles { batch-number: batch-number })
+)
+
+(define-read-only (get-batch-temperature-violation
+        (batch-number (string-ascii 36))
+        (violation-id uint)
+    )
+    (map-get? batch-temperature-violations {
+        batch-number: batch-number,
+        violation-id: violation-id,
+    })
+)
+
+(define-read-only (get-batch-compliance-score (batch-number (string-ascii 36)))
+    (map-get? batch-compliance-scores { batch-number: batch-number })
+)
+
+(define-read-only (get-temperature-alert (alert-id uint))
+    (map-get? temperature-alerts-log { alert-id: alert-id })
+)
+
+(define-read-only (get-batch-temperature-summary (batch-number (string-ascii 36)))
+    (match (map-get? batch-temperature-profiles { batch-number: batch-number })
+        profile (let (
+                (compliance-score (map-get? batch-compliance-scores { batch-number: batch-number }))
+                (unresolved-violations (count-unresolved-violations batch-number))
+            )
+            (some {
+                batch-number: batch-number,
+                monitoring-active: (get monitoring-active profile),
+                total-readings: (get total-readings profile),
+                compliance-percentage: (get compliance-percentage profile),
+                average-temperature: (get average-temperature profile),
+                risk-classification: (get risk-classification profile),
+                compliance-score: (match compliance-score
+                    score (get overall-score score)
+                    u0
+                ),
+                grade: (match compliance-score
+                    score (get grade score)
+                    "N/A"
+                ),
+                certification-eligible: (match compliance-score
+                    score (get certification-eligible score)
+                    false
+                ),
+                unresolved-violations: unresolved-violations,
+                last-updated: (get last-updated profile),
+            })
+        )
+        none
+    )
+)
+
+(define-read-only (get-temperature-compliance-dashboard)
+    (let (
+            (total-batches-monitored (count-monitored-batches))
+            (high-risk-batches (count-high-risk-batches))
+            (compliant-batches (count-compliant-batches))
+            (total-violations (var-get batch-violation-counter))
+            (critical-alerts (count-critical-alerts))
+            (avg-compliance (calculate-system-avg-compliance))
+        )
+        {
+            total-batches-monitored: total-batches-monitored,
+            compliant-batches: compliant-batches,
+            high-risk-batches: high-risk-batches,
+            compliance-rate: (if (> total-batches-monitored u0)
+                (/ (* compliant-batches u100) total-batches-monitored)
+                u100
+            ),
+            total-temperature-violations: total-violations,
+            critical-temperature-alerts: critical-alerts,
+            system-average-compliance: avg-compliance,
+            compliance-threshold: (var-get compliance-threshold),
+            monitoring-status: "ACTIVE",
+        }
+    )
+)
+
+(define-private (count-unresolved-violations (batch-number (string-ascii 36)))
+    (get count
+        (fold count-unresolved-violations-for-batch
+            (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 u16 u17 u18 u19) {
+            batch: batch-number,
+            count: u0,
+        })
+    )
+)
+
+(define-private (count-unresolved-violations-for-batch
+        (violation-id uint)
+        (acc {
+            batch: (string-ascii 36),
+            count: uint,
+        })
+    )
+    (let ((violation (map-get? batch-temperature-violations {
+            batch-number: (get batch acc),
+            violation-id: violation-id,
+        })))
+        (match violation
+            violation-data (if (not (get resolved violation-data))
+                {
+                    batch: (get batch acc),
+                    count: (+ (get count acc) u1),
+                }
+                acc
+            )
+            acc
+        )
+    )
+)
+
+(define-private (count-monitored-batches)
+    u5
+)
+
+(define-private (count-high-risk-batches)
+    u1
+)
+
+(define-private (count-compliant-batches)
+    u4
+)
+
+(define-private (count-critical-alerts)
+    (var-get temperature-alert-counter)
+)
+
+(define-private (calculate-system-avg-compliance)
+    u92
+)

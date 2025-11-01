@@ -62,6 +62,6 @@ plan:
         - emulated-contract-publish:
             contract-name: Health-Supply-Chain-System
             emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
-            path: contracts/Health-Supply-Chain-System.clar
+            path: "contracts\\Health-Supply-Chain-System.clar"
             clarity-version: 3
       epoch: "3.1"
